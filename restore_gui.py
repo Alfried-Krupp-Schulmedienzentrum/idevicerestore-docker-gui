@@ -60,7 +60,7 @@ class RestoreGui:
         self.progress_raw = None
         self.last_progress_update = 0.0
 
-        self.status = "Bereit"
+        self.status = "Ready"
         self.confirm_reset = False
         self.abort_requested_at = None
 
@@ -175,7 +175,7 @@ class RestoreGui:
             return 127, "", str(exc)
 
         except subprocess.TimeoutExpired:
-            return 124, "", f"Timeout bei Befehl: {' '.join(cmd)}"
+            return 124, "", f"Timeout while running command: {' '.join(cmd)}"
 
     def systemctl_available(self):
         return shutil.which("systemctl") is not None
@@ -210,13 +210,13 @@ class RestoreGui:
 
     def prepare_host_usbmuxd(self):
         if not self.manage_usbmuxd:
-            self.add_line("Host-usbmuxd-Prüfung deaktiviert.")
+            self.add_line("Host usbmuxd check disabled.")
             return True
 
-        self.add_line("Prüfe Host-usbmuxd …")
+        self.add_line("Checking host usbmuxd …")
 
         if not self.systemctl_available():
-            self.add_line("Warnung: systemctl nicht gefunden, usbmuxd wird nicht automatisch verwaltet.")
+            self.add_line("Warning: systemctl not found. Host usbmuxd will not be managed automatically.")
             return True
 
         available_units = []
@@ -225,7 +225,7 @@ class RestoreGui:
             load_state = self.systemctl_show_value(unit, "LoadState")
 
             if load_state in (None, "", "not-found"):
-                self.add_line(f"{unit}: nicht gefunden")
+                self.add_line(f"{unit}: not found")
                 continue
 
             active_state = self.systemctl_is_active(unit)
@@ -245,13 +245,13 @@ class RestoreGui:
             )
 
         if not available_units:
-            self.add_line("Keine systemd-Units für usbmuxd gefunden.")
+            self.add_line("No systemd units for usbmuxd found.")
             return True
 
         unit_names = [entry["unit"] for entry in available_units]
 
-        # Erst stoppen, damit kein Host-usbmuxd mehr aktiv am USB-Gerät hängt.
-        self.add_line("Stoppe Host-usbmuxd service/socket …")
+        # First stop the host service/socket so it no longer holds the USB device.
+        self.add_line("Stopping host usbmuxd service/socket …")
         rc, stdout, stderr = self.run_host_command(
             ["systemctl", "stop"] + unit_names,
             need_root=True,
@@ -259,25 +259,25 @@ class RestoreGui:
         )
 
         if rc != 0:
-            self.add_line("Fehler: Host-usbmuxd konnte nicht gestoppt werden.")
+            self.add_line("Error: Could not stop host usbmuxd.")
             if stderr:
                 self.add_line(stderr)
             if stdout:
                 self.add_line(stdout)
 
             if "sudo" in stderr.lower() or "password" in stderr.lower():
-                self.add_line("Hinweis: Bitte vorher `sudo -v` ausführen oder das Script mit sudo starten.")
+                self.add_line("Hint: Run `sudo -v` first or start this script with sudo.")
 
             if not self.ignore_usbmuxd_failure:
-                self.status = "Abbruch: Host-usbmuxd konnte nicht gestoppt werden."
+                self.status = "Aborted: Could not stop host usbmuxd."
                 self.dirty = True
                 return False
 
         else:
-            self.add_line("Host-usbmuxd wurde gestoppt.")
+            self.add_line("Host usbmuxd stopped.")
 
-        # Dann temporär maskieren. Das verhindert, dass usbmuxd.socket
-        # durch udev oder Socket-Aktivierung sofort wieder gestartet wird.
+        # Then temporarily mask the units. This prevents usbmuxd.socket
+        # from being started again immediately by socket activation or udev.
         if self.mask_usbmuxd:
             for entry in available_units:
                 unit = entry["unit"]
@@ -285,10 +285,10 @@ class RestoreGui:
                 load_state = entry["load_state"]
 
                 if enabled_state == "masked" or load_state == "masked":
-                    self.add_line(f"{unit}: bereits maskiert, wird später nicht verändert.")
+                    self.add_line(f"{unit}: already masked, will not be changed later.")
                     continue
 
-                self.add_line(f"Maskiere {unit} temporär bis zum nächsten Unmask/Reboot …")
+                self.add_line(f"Temporarily masking {unit} until unmask or reboot …")
                 rc, stdout, stderr = self.run_host_command(
                     ["systemctl", "mask", "--runtime", unit],
                     need_root=True,
@@ -296,24 +296,24 @@ class RestoreGui:
                 )
 
                 if rc != 0:
-                    self.add_line(f"Fehler: {unit} konnte nicht temporär maskiert werden.")
+                    self.add_line(f"Error: Could not temporarily mask {unit}.")
                     if stderr:
                         self.add_line(stderr)
                     if stdout:
                         self.add_line(stdout)
 
                     if not self.ignore_usbmuxd_failure:
-                        self.status = f"Abbruch: {unit} konnte nicht maskiert werden."
+                        self.status = f"Aborted: Could not mask {unit}."
                         self.dirty = True
                         return False
 
                 else:
                     self.usbmuxd_masked_by_us.append(unit)
-                    self.add_line(f"{unit}: temporär maskiert.")
+                    self.add_line(f"{unit}: temporarily masked.")
 
-        # Zusätzlich eventuell noch laufenden Prozess entfernen.
-        # Das ist absichtlich nach systemctl stop/mask, damit er nicht direkt wiederkommt.
-        self.add_line("Prüfe laufenden usbmuxd-Prozess …")
+        # Also remove any still-running usbmuxd process.
+        # This is intentionally done after stop/mask so it does not come back immediately.
+        self.add_line("Checking for running usbmuxd process …")
         rc, stdout, stderr = self.run_host_command(
             ["pgrep", "-x", "usbmuxd"],
             need_root=False,
@@ -321,7 +321,7 @@ class RestoreGui:
         )
 
         if rc == 0:
-            self.add_line("Laufender usbmuxd-Prozess gefunden, beende ihn …")
+            self.add_line("Running usbmuxd process found. Terminating it …")
             rc, stdout, stderr = self.run_host_command(
                 ["pkill", "-x", "usbmuxd"],
                 need_root=True,
@@ -329,20 +329,20 @@ class RestoreGui:
             )
 
             if rc != 0:
-                self.add_line("Warnung: usbmuxd-Prozess konnte nicht beendet werden.")
+                self.add_line("Warning: Could not terminate usbmuxd process.")
                 if stderr:
                     self.add_line(stderr)
 
                 if not self.ignore_usbmuxd_failure:
-                    self.status = "Abbruch: laufender usbmuxd-Prozess konnte nicht beendet werden."
+                    self.status = "Aborted: Could not terminate running usbmuxd process."
                     self.dirty = True
                     return False
             else:
-                self.add_line("Laufender usbmuxd-Prozess wurde beendet.")
+                self.add_line("Running usbmuxd process terminated.")
         else:
-            self.add_line("Kein laufender Host-usbmuxd-Prozess gefunden.")
+            self.add_line("No running host usbmuxd process found.")
 
-        self.add_line("Host-usbmuxd ist für den Restore vorbereitet.")
+        self.add_line("Host usbmuxd is prepared for restore.")
         return True
 
     def restore_host_usbmuxd(self):
@@ -354,7 +354,7 @@ class RestoreGui:
             return
 
         units = list(dict.fromkeys(self.usbmuxd_masked_by_us))
-        self.add_line("Hebe temporäre usbmuxd-Maskierung wieder auf …")
+        self.add_line("Removing temporary usbmuxd mask …")
 
         rc, stdout, stderr = self.run_host_command(
             ["systemctl", "unmask", "--runtime"] + units,
@@ -363,13 +363,13 @@ class RestoreGui:
         )
 
         if rc != 0:
-            self.add_line("Warnung: Temporäre usbmuxd-Maskierung konnte nicht automatisch aufgehoben werden.")
+            self.add_line("Warning: Could not automatically remove temporary usbmuxd mask.")
             if stderr:
                 self.add_line(stderr)
-            self.add_line("Manuell möglich mit:")
+            self.add_line("You can remove it manually with:")
             self.add_line("sudo systemctl unmask --runtime usbmuxd.service usbmuxd.socket")
         else:
-            self.add_line("Temporäre usbmuxd-Maskierung wurde aufgehoben.")
+            self.add_line("Temporary usbmuxd mask removed.")
 
         self.usbmuxd_masked_by_us.clear()
         self.dirty = True
@@ -388,7 +388,7 @@ class RestoreGui:
         if not match:
             return False
 
-        label = match.group("label").strip() or "Fortschritt"
+        label = match.group("label").strip() or "Progress"
         percent = float(match.group("percent"))
 
         self.progress_label = label
@@ -401,16 +401,15 @@ class RestoreGui:
     def add_line(self, text):
         text = self.clean_text(text).strip()
 
-        # Leerzeilen konsequent entfernen.
+        # Remove empty lines from the visible log.
         if not text:
             return
 
-        # Fortschrittszeilen nicht ins Log schreiben,
-        # sondern nur die Progress-Bar aktualisieren.
+        # Progress lines are shown in the progress bar instead of the log window.
         if self.detect_progress(text):
             return
 
-        # Doppelte direkt aufeinanderfolgende Logzeilen vermeiden.
+        # Avoid duplicate consecutive log lines.
         if self.lines and self.lines[-1] == text:
             return
 
@@ -434,8 +433,7 @@ class RestoreGui:
         text = data.decode(errors="replace")
         text = self.clean_text(text)
 
-        # Normale PTY-Zeilen kommen oft als CRLF.
-        # Das darf nicht als Progress-CR gewertet werden.
+        # PTY output often uses CRLF. This must not be treated as progress output.
         text = text.replace("\r\n", "\n").replace("\n\r", "\n")
 
         for char in text:
@@ -443,8 +441,8 @@ class RestoreGui:
                 self.finish_partial_line()
 
             elif char == "\r":
-                # Echte Fortschrittsanzeigen werden mit Carriage Return überschrieben.
-                # Wir übernehmen sie nur in die separate Progress-Bar.
+                # Real progress output is often overwritten using carriage returns.
+                # Show it only in the separate progress bar.
                 if self.partial_line:
                     line = self.partial_line
                     self.partial_line = ""
@@ -459,8 +457,7 @@ class RestoreGui:
             else:
                 self.partial_line += char
 
-                # Falls eine Progresszeile ohne CR lange steht,
-                # trotzdem die Bar aktualisieren.
+                # If a progress line stays visible without CR, still update the bar.
                 stripped = self.partial_line.strip()
                 if PROGRESS_RE.match(stripped):
                     self.detect_progress(stripped)
@@ -491,8 +488,8 @@ class RestoreGui:
 
         if run_sh.startswith("./") or run_sh.startswith("/"):
             if not Path(run_sh).exists():
-                self.status = f"Nicht gefunden: {run_sh}"
-                self.add_line(f"Fehler: {run_sh} wurde nicht gefunden.")
+                self.status = f"Not found: {run_sh}"
+                self.add_line(f"Error: {run_sh} was not found.")
                 self.dirty = True
                 return
 
@@ -512,15 +509,15 @@ class RestoreGui:
         self.abort_requested_at = None
         self.usbmuxd_masked_by_us.clear()
 
-        self.add_line("Starte Restore-Befehl:")
+        self.add_line("Starting restore command:")
         self.add_line(" ".join(self.command))
 
         if not self.prepare_host_usbmuxd():
-            self.add_line("Restore wurde nicht gestartet.")
+            self.add_line("Restore was not started.")
             self.dirty = True
             return
 
-        self.status = "Restore läuft … Auswahl wie 1 + Enter wird an idevicerestore weitergegeben."
+        self.status = "Restore running … Input such as 1 + Enter is forwarded to idevicerestore."
 
         master_fd, slave_fd = pty.openpty()
 
@@ -548,8 +545,8 @@ class RestoreGui:
 
         if self.abort_requested_at is None:
             self.abort_requested_at = time.time()
-            self.status = "Abbruch angefordert … erneut Ctrl+A erzwingt SIGKILL."
-            self.add_line("Sende SIGTERM an Restore-Prozess …")
+            self.status = "Abort requested … Press Ctrl+A again to force SIGKILL."
+            self.add_line("Sending SIGTERM to restore process …")
 
             try:
                 os.killpg(self.proc.pid, signal.SIGTERM)
@@ -557,7 +554,7 @@ class RestoreGui:
                 pass
 
         else:
-            self.add_line("Sende SIGKILL an Restore-Prozess …")
+            self.add_line("Sending SIGKILL to restore process …")
 
             try:
                 os.killpg(self.proc.pid, signal.SIGKILL)
@@ -617,13 +614,13 @@ class RestoreGui:
         self.finish_partial_line()
 
         if rc == 0:
-            self.status = f"Restore beendet: Erfolg. Log: {self.log_path}"
-            self.progress_label = "Fertig"
+            self.status = f"Restore finished successfully. Log: {self.log_path}"
+            self.progress_label = "Done"
             self.progress_percent = 100.0
-            self.add_line("Restore erfolgreich beendet.")
+            self.add_line("Restore finished successfully.")
         else:
-            self.status = f"Restore beendet mit Fehlercode {rc}. Log: {self.log_path}"
-            self.add_line(f"Restore beendet mit Fehlercode {rc}.")
+            self.status = f"Restore finished with exit code {rc}. Log: {self.log_path}"
+            self.add_line(f"Restore finished with exit code {rc}.")
 
         if self.master_fd is not None:
             try:
@@ -670,8 +667,8 @@ class RestoreGui:
     def get_display_lines(self):
         display_lines = list(self.lines)
 
-        # Prompt-Zeilen ohne Zeilenumbruch sichtbar machen,
-        # aber Progresszeilen nicht doppelt anzeigen.
+        # Show prompt lines without line breaks,
+        # but do not duplicate progress lines.
         if self.partial_line and not PROGRESS_RE.match(self.partial_line.strip()):
             text = self.clean_text(self.partial_line).strip()
             if text:
@@ -683,11 +680,11 @@ class RestoreGui:
         self.clear_line(y)
 
         if self.progress_percent is None:
-            text = "Fortschritt: -"
+            text = "Progress: -"
             self.safe_addstr(y, 2, text)
             return
 
-        label = self.progress_label or "Fortschritt"
+        label = self.progress_label or "Progress"
         percent = self.progress_percent
         percent_text = f"{percent:5.1f}%"
         prefix = f"{label}: "
@@ -727,7 +724,7 @@ class RestoreGui:
             self.safe_addstr(
                 0,
                 0,
-                "Terminal zu klein. Bitte Fenster größer ziehen. Mindestgröße ca. 70x14.",
+                "Terminal too small. Please resize it. Minimum size is about 70x14.",
                 curses.A_BOLD,
             )
             self.stdscr.refresh()
@@ -739,30 +736,30 @@ class RestoreGui:
             self.clear_line(y)
 
         self.safe_addstr(0, 2, "idevicerestore Docker GUI", curses.A_BOLD)
-        self.safe_addstr(1, 2, "Befehl: " + " ".join(self.command))
+        self.safe_addstr(1, 2, "Command: " + " ".join(self.command))
         self.safe_addstr(2, 2, "Status: " + self.status)
         self.draw_progress(3, w)
 
         if self.confirm_reset:
-            help_text = "Wirklich iPad löschen/zurücksetzen?  [j] Ja   [n] Nein"
+            help_text = "Really erase and restore this iPad?  [y] Yes   [n] No"
             help_attr = curses.A_REVERSE | curses.A_BOLD
         elif self.proc is None:
-            help_text = "[r] Zurücksetzen starten   [q] Beenden   [↑/↓/Bild↑/Bild↓] Log scrollen   [Ende] Auto-Scroll"
+            help_text = "[r] Start restore   [q] Quit   [↑/↓/PgUp/PgDn] Scroll log   [End] Auto-scroll"
             help_attr = curses.A_REVERSE
         else:
-            help_text = "Restore läuft: Zahlen/Text + Enter gehen an idevicerestore   [Ctrl+A] Abbrechen   [Ctrl+L] Neu zeichnen"
+            help_text = "Restore running: numbers/text + Enter are sent to idevicerestore   [Ctrl+A] Abort   [Ctrl+L] Redraw"
             help_attr = curses.A_REVERSE
 
         self.safe_addstr(4, 0, help_text.ljust(w - 1), help_attr)
 
-        # Log-Bereich
+        # Log area
         log_top = 5
         log_left = 0
         log_height = h - 6
         log_width = w
 
         self.draw_border(log_top, log_left, log_height, log_width)
-        self.safe_addstr(log_top, 2, " Log-Ausgabe ")
+        self.safe_addstr(log_top, 2, " Log output ")
 
         inner_top = log_top + 1
         inner_left = 1
@@ -792,13 +789,13 @@ class RestoreGui:
         # Footer
         self.clear_line(h - 1)
 
-        footer = f"Logdatei: {self.log_path}" if self.log_path else "Noch keine Logdatei erstellt"
+        footer = f"Log file: {self.log_path}" if self.log_path else "No log file created yet"
 
         if self.usbmuxd_masked_by_us:
-            footer += "   |   usbmuxd temporär maskiert"
+            footer += "   |   usbmuxd temporarily masked"
 
         if not self.autoscroll:
-            footer += "   |   Auto-Scroll aus, [Ende] aktiviert ihn wieder"
+            footer += "   |   Auto-scroll off, press [End] to re-enable"
 
         self.safe_addstr(h - 1, 2, footer)
 
@@ -848,24 +845,24 @@ class RestoreGui:
             return True
 
         if self.confirm_reset:
-            if key in (ord("j"), ord("J")):
+            if key in (ord("y"), ord("Y"), ord("j"), ord("J")):
                 self.confirm_reset = False
                 self.start_restore()
 
             elif key in (ord("n"), ord("N"), 27):
                 self.confirm_reset = False
-                self.status = "Zurücksetzen abgebrochen"
+                self.status = "Restore cancelled"
                 self.dirty = True
 
             return True
 
         if self.proc is not None:
-            # Ctrl+A = Abbruch
+            # Ctrl+A = abort
             if key == 1:
                 self.request_abort()
                 return True
 
-            # Ctrl+L = kompletter Neuaufbau
+            # Ctrl+L = full redraw
             if key == 12:
                 self.stdscr.erase()
                 self.dirty = True
@@ -882,21 +879,21 @@ class RestoreGui:
                 self.handle_scroll_key(key)
                 return True
 
-            # Enter weitergeben, wichtig für iPadOS-Auswahl
+            # Forward Enter, required for iPadOS firmware selection.
             if key in (10, 13, curses.KEY_ENTER):
                 self.send_to_child(b"\n")
                 return True
 
-            # Backspace weitergeben
+            # Forward Backspace.
             if key in (curses.KEY_BACKSPACE, 127, 8):
                 self.send_to_child(b"\x7f")
                 return True
 
-            # ESC nicht weitergeben
+            # Do not forward ESC.
             if key == 27:
                 return True
 
-            # Normale Zeichen weitergeben, z. B. 1, 2, 3 für Firmware-Auswahl
+            # Forward normal characters, for example 1, 2, 3 for firmware selection.
             if 0 <= key <= 255:
                 char = chr(key)
 
@@ -907,7 +904,7 @@ class RestoreGui:
 
             return True
 
-        # Keine laufende Wiederherstellung
+        # No restore process is running.
         if key in (ord("q"), ord("Q")):
             return False
 
@@ -978,49 +975,49 @@ def curses_main(stdscr, args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Curses-GUI für libimobiledevice/idevicerestore docker/run.sh"
+        description="Curses TUI for libimobiledevice/idevicerestore Docker run.sh"
     )
 
     parser.add_argument(
         "--run-sh",
         default="./run.sh",
-        help="Pfad zur run.sh, Standard: ./run.sh",
+        help="Path to run.sh, default: ./run.sh",
     )
 
     parser.add_argument(
         "--sudo",
         action="store_true",
-        help="run.sh mit sudo starten. Für die usbmuxd-Prüfung trotzdem vorher sudo -v ausführen oder das ganze Script mit sudo starten.",
+        help="Start run.sh with sudo. For host usbmuxd handling, run sudo -v first or start this entire script with sudo.",
     )
 
     parser.add_argument(
         "--log-dir",
         default="./logs",
-        help="Ordner für Logdateien, Standard: ./logs",
+        help="Directory for log files, default: ./logs",
     )
 
     parser.add_argument(
         "--no-usbmuxd-check",
         action="store_true",
-        help="Host-usbmuxd vor dem Restore nicht prüfen/stoppen.",
+        help="Do not check or stop host usbmuxd before restore.",
     )
 
     parser.add_argument(
         "--no-usbmuxd-mask",
         action="store_true",
-        help="usbmuxd.service/socket nur stoppen, aber nicht temporär maskieren.",
+        help="Only stop usbmuxd.service/socket, but do not temporarily mask them.",
     )
 
     parser.add_argument(
         "--ignore-usbmuxd-failure",
         action="store_true",
-        help="Restore trotzdem starten, wenn usbmuxd nicht gestoppt/maskiert werden konnte.",
+        help="Start restore anyway if usbmuxd could not be stopped or masked.",
     )
 
     parser.add_argument(
         "restore_args",
         nargs=argparse.REMAINDER,
-        help="Argumente für run.sh, Standard: --erase --latest -d",
+        help="Arguments for run.sh, default: --erase --latest -d",
     )
 
     return parser.parse_args()
@@ -1031,4 +1028,4 @@ if __name__ == "__main__":
         curses.wrapper(curses_main, parse_args())
 
     except KeyboardInterrupt:
-        print("Abgebrochen.", file=sys.stderr)
+        print("Aborted.", file=sys.stderr)
